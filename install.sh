@@ -8,7 +8,20 @@ set -euo pipefail
 # ==============================
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# Defaults (overridable via flags)
 BINARY_NAME="fe_local"
+
+# Args: --name <binary_name>
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)
+      BINARY_NAME="$2"; shift 2 ;;
+    *)
+      shift ;;
+  esac
+done
+
 BINARY_PATH="$PROJECT_ROOT/bin/$BINARY_NAME"
 INSTALL_PATH="/usr/local/bin/$BINARY_NAME"
 
@@ -19,12 +32,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}🚀 Installing FE Local globally...${NC}"
+echo -e "${BLUE}🚀 Installing $BINARY_NAME globally...${NC}"
 
 # Check if binary exists
 if [ ! -f "$BINARY_PATH" ]; then
   echo -e "${RED}❌ Binary not found at $BINARY_PATH${NC}"
-  echo -e "${YELLOW}💡 Run ./build.sh first to build the binary${NC}"
+  echo -e "${YELLOW}💡 Run ./build.sh --name $BINARY_NAME --script <script.py> first to build the binary${NC}"
   exit 1
 fi
 
@@ -42,6 +55,7 @@ fi
 
 # Install binary globally
 echo -e "${BLUE}📦 Installing to $INSTALL_PATH...${NC}"
+echo -e "${YELLOW}⚠️ This requires sudo privileges. Please enter your password when prompted.${NC}"
 sudo cp "$BINARY_PATH" "$INSTALL_PATH"
 sudo chmod +x "$INSTALL_PATH"
 
@@ -55,16 +69,16 @@ fi
 if command -v "$BINARY_NAME" >/dev/null 2>&1; then
   echo ""
   echo -e "${GREEN}✅ Installation successful!${NC}"
-  echo -e "${GREEN}🎉 You can now run 'fe_local' from anywhere${NC}"
+  echo -e "${GREEN}🎉 You can now run '$BINARY_NAME' from anywhere${NC}"
   echo ""
   echo -e "${BLUE}📋 Usage examples:${NC}"
-  echo "   fe_local               # Run the CLI tool"
-  echo "   which fe_local         # Show installation path"
-  echo "   fe_local --help        # Show help (if implemented)"
+  echo "   $BINARY_NAME               # Run the CLI tool"
+  echo "   which $BINARY_NAME         # Show installation path"
+  echo "   $BINARY_NAME --help        # Show help (if implemented)"
   echo ""
   echo -e "${YELLOW}🔄 To update:${NC}"
-  echo "   1. Run ./build.sh to rebuild"
-  echo "   2. Run ./install.sh to reinstall"
+  echo "   1. Run ./build.sh --name $BINARY_NAME --script <script.py> to rebuild"
+  echo "   2. Run ./install.sh --name $BINARY_NAME to reinstall"
   echo ""
   echo -e "${YELLOW}🗑️ To uninstall:${NC}"
   echo "   sudo rm $INSTALL_PATH"

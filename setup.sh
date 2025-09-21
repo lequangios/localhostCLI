@@ -16,14 +16,14 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}🚀 Setting up FE Local (Build + Install)...${NC}"
+echo -e "${BLUE}🚀 Setting up (Build + Install)...${NC}"
 echo ""
 
-# Step 1: Build
+# Step 1: Build (forward all args, supports --script and --name)
 echo -e "${BLUE}📦 Step 1: Building binary...${NC}"
 if [ -f "$PROJECT_ROOT/build.sh" ]; then
   chmod +x "$PROJECT_ROOT/build.sh"
-  "$PROJECT_ROOT/build.sh"
+  "$PROJECT_ROOT/build.sh" "$@"
 else
   echo -e "${RED}❌ build.sh not found${NC}"
   exit 1
@@ -31,15 +31,15 @@ fi
 
 echo ""
 
-# Step 2: Install
+# Step 2: Install (forward all args; install.sh supports --name)
 echo -e "${BLUE}📦 Step 2: Installing globally...${NC}"
 if [ -f "$PROJECT_ROOT/install.sh" ]; then
   chmod +x "$PROJECT_ROOT/install.sh"
-  "$PROJECT_ROOT/install.sh"
+  "$PROJECT_ROOT/install.sh" "$@"
 else
   echo -e "${RED}❌ install.sh not found${NC}"
   exit 1
 fi
 
 echo ""
-echo -e "${GREEN}🎉 Setup complete! You can now run 'fe_local' from anywhere.${NC}"
+echo -e "${GREEN}🎉 Setup complete!${NC}"

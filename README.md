@@ -1,122 +1,121 @@
-# 🛠️ MAMP Project Host Manager (MPHM)
+# 🚀 FE LAMP CLI
 
-A CLI tool that helps you **create, manage, and delete Virtual Hosts in MAMP** for popular web project types like:
+LAMP stack local management via Homebrew. Provides two CLIs:
 
-- 🌐 WordPress
-- 🔧 Laravel
-- 🐘 Plain PHP
-- 📄 Static HTML
+- `lamp_cli.py` → binary `fe_lamp`: Install/Configure/Start/Stop LAMP (Apache, PHP, MySQL/MariaDB, phpMyAdmin)
+- `lamp_site_cli.py` → binary `fe_lamp_site`: Manage local virtual hosts, domains, and project templates
 
-> 👤 Supports macOS and MAMP (Apache, port 8888)
+No longer depends on MAMP. Everything runs on Homebrew services and standard Apache configs.
 
 ---
 
-## 🚀 Features
+## ✨ Features
 
-- ✅ Create new VirtualHost with `.yen` domain
-- 🗂️ Automatically detect project type based on folder structure
-- 🔁 Automatically add domain to `/etc/hosts`
-- 📂 Choose custom folder for each project
-- 📊 List all registered `.yen` sites
-- 🗑️ Easily delete any VirtualHost
-- 🌐 Open browser after setup
-- 🧪 Create sample WordPress/Laravel projects
-- 🔐 Simple terminal-based management, no GUI needed
-
----
-
-## 🧠 Project Type Detection
-
-| Project Type | Detection Criteria                                 |
-| ------------ | -------------------------------------------------- |
-| WordPress    | Contains `wp-config.php` file                      |
-| Laravel      | Contains `artisan` file                            |
-| Plain PHP    | Contains `.php` files but not WP or Laravel        |
-| Static HTML  | Contains `.html` files, no `.php` or `artisan`     |
+- Install/upgrade Apache, PHP, MySQL/MariaDB, phpMyAdmin via Homebrew
+- Auto-configure Apache for PHP, phpMyAdmin aliases, PHP session dir, MySQL root (`root/fe_root`)
+- Persist configuration to `/opt/fe_lamp/fe_lamp.json`
+- Manage virtual hosts with JSON source `/opt/fe_lamp/fe_lamp_site.json`
+- Start/stop/restart services (phpMyAdmin excluded from service ops)
+- Change Apache port and document root
+- Robust PHP/MySQL/phpMyAdmin tests
+- Dynamic dashboard (`index.php`) auto-deployed to doc root using `template/index_template.php`
 
 ---
 
-## 📦 Default Configuration
+## 🧠 Project Type Detection (fe_lamp_site)
 
-- MAMP VirtualHost config:  
-  `/Applications/MAMP/conf/apache/extra/httpd-vhosts.conf`
+| Type       | Marker                                       |
+| ---------- | -------------------------------------------- |
+| WordPress  | `wp-config.php`                              |
+| Laravel    | `artisan`                                    |
+| Symfony    | `bin/console` or `symfony.lock`              |
+| Drupal     | `core/lib/Drupal.php` or `web/core/...`      |
+| Magento    | `bin/magento` and `app/code`                 |
+| PHP        | Common PHP files in root                     |
+| HTML       | `index.html` / `home.html`                   |
+| JavaScript | `package.json`                               |
 
-- Apache restart command:  
-  `/Applications/MAMP/bin/apache2/bin/apachectl -k restart`
-
-- Default port: `8888`
-
----
-
-## 📋 CLI Menu
-
-```bash
-=========== MAMP HOST TOOL (.yen) ===========
-1) Create new site
-2) Delete site
-3) List existing sites
-4) Create sample WordPress/Laravel project
-0) Exit
-=============================================
-```
+Parent directory is also checked to handle cases like Laravel `public/`.
 
 ---
 
-## 🔧 System Requirements
+## 🔧 Requirements
 
 - macOS
-- MAMP installed in `/Applications/MAMP`
+- Homebrew
 - Python 3
-- `composer` (for Laravel)
-- `curl`, `unzip` (for WordPress)
-- `sudo` access to modify `/etc/hosts`
+- `sudo` access (for Apache/httpd.conf, /etc/hosts, /opt/fe_lamp)
 
 ---
 
-## 🔧 Build to Executable (Standalone)
+## 📦 Build Binaries
 
-This project includes a **stable, standalone build** process that does **not** depend on your Python env.
+`build.sh` is now parameterized.
 
-### 🚀 Quick Setup (Recommended)
 ```bash
-chmod +x setup.sh
-./setup.sh
-```
-This will build and install MPHM globally so you can run `mphm` from anywhere.
-
-### 🧰 Manual Build & Install
-```bash
-# Build only
-chmod +x build.sh
+# fe_local (legacy example)
 ./build.sh
 
-# Install globally
-chmod +x install.sh
-./install.sh
+# fe_lamp
+./build.sh --script lamp_cli.py --name fe_lamp
+
+# fe_lamp_site
+./build.sh --script lamp_site_cli.py --name fe_lamp_site
+
+# force rebuild
+./build.sh --script lamp_cli.py --name fe_lamp --force
 ```
 
-### 🗑️ Uninstall
+Install globally:
+
 ```bash
-./uninstall.sh
+# install
+./install.sh --name fe_lamp
+./install.sh --name fe_lamp_site
+
+# uninstall
+./uninstall.sh --name fe_lamp
+./uninstall.sh --name fe_lamp_site
 ```
 
-> The build script spins up a temporary virtual environment only for building, embeds dependencies via PyInstaller, and cleans everything afterward—so the final binary runs independently of your local Python setup.
+All-in-one setup (build + install):
+
+```bash
+./setup.sh --script lamp_cli.py --name fe_lamp
+./setup.sh --script lamp_site_cli.py --name fe_lamp_site
+```
 
 ---
 
-## 🛡️ Notes
+## 🧭 Usage
 
-- Always verify the selected folder matches the intended project type
-- `.yen` domains only work locally if correctly added to `/etc/hosts`
+Core LAMP management:
+
+```bash
+fe_lamp status
+fe_lamp install --db mysql
+fe_lamp start | stop | restart
+fe_lamp configure-apache --port 8080 --doc-root /opt/homebrew/var/www
+fe_lamp show-apache-config
+```
+
+Site management:
+
+```bash
+fe_lamp_site          # interactive menu
+fe_lamp_site --help   # help
+```
+
+Backed by:
+- Apache vhosts: `/opt/homebrew/etc/httpd/extra/httpd-vhosts.conf`
+- Hosts file: `/etc/hosts`
+- Config: `/opt/fe_lamp/fe_lamp.json`, `/opt/fe_lamp/fe_lamp_site.json`
 
 ---
 
-## 🛠️ Future Plans
+## 📄 Dashboard
 
-- Auto-create databases per site
-- Support local SSL (https)
-- Colorful CLI interface (using `rich`)
-- Optional Docker support
+After installation, `template/index_template.php` is copied to the Apache doc root as `index.php`. The page binds data from `fe_lamp_site.json` and groups projects by type.
 
 ---
 
