@@ -135,6 +135,15 @@ pyinstaller \
   --exclude-module pygments \
   --exclude-module markdown_it \
   --exclude-module mdurl \
+  --hidden-import src.lamp_manager \
+  --hidden-import src.lamp_apache_manager \
+  --hidden-import src.lamp_vhost_manager \
+  --hidden-import src.lamp_hosts_mamager \
+  --hidden-import src.lamp_site_manager \
+  --hidden-import src.lamp_site_detector \
+  --paths "$PROJECT_ROOT/src" \
+  --add-data "$PROJECT_ROOT/template:template" \
+  --add-data "$PROJECT_ROOT/src:src" \
   --add-data "$PROJECT_ROOT/requirements.txt:." \
   "$PROJECT_ROOT/$SCRIPT_NAME"
 

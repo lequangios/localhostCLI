@@ -1,4 +1,7 @@
-from .lamp_manager import LampManager
-from .lamp_site_manager import LampSiteManager
+"""src package marker for FE LAMP.
 
-__all__ = ["LampManager", "LampSiteManager"]
+Avoid importing submodules here to prevent import-time side effects
+in bundled environments (PyInstaller).
+"""
+
+__all__ = []

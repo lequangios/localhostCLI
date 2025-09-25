@@ -14,19 +14,49 @@ from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-# Add src directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+def _get_binary_name() -> str:
+    name = os.path.basename(sys.argv[0]) or "lamp_site_cli"
+    if name.endswith(".py"):
+        name = "lamp_site_cli"
+    return os.environ.get("FE_LAMP_SITE_NAME", name)
 
-from lamp_site_manager import LampSiteManager
+BINARY_NAME = _get_binary_name()
+
+# Robust import for bundled/source environments
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(SCRIPT_DIR, 'src')
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+try:
+    # In bundled onefile, PyInstaller often exposes modules at top-level
+    from lamp_site_manager import LampSiteManager  # type: ignore
+except Exception:
+    try:
+        # When running from source with package layout
+        from src.lamp_site_manager import LampSiteManager  # type: ignore
+    except Exception:
+        # Final fallback: import by file path from src dir
+        try:
+            import importlib.util
+            module_path = os.path.join(SRC_DIR, 'lamp_site_manager.py')
+            spec = importlib.util.spec_from_file_location('lamp_site_manager', module_path)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)  # type: ignore
+                LampSiteManager = getattr(mod, 'LampSiteManager')  # type: ignore
+            else:
+                raise ModuleNotFoundError('lamp_site_manager')
+        except Exception as _e:
+            raise
 
 console = Console()
 
 # Version information
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 APP_NAME = "LAMP Site CLI"
 
 # Default settings
-DEFAULT_DOMAIN_SUFFIX = ".local"
+DEFAULT_DOMAIN_SUFFIX = ".test"
 DEFAULT_PORT = 8080
 
 
@@ -40,7 +70,7 @@ def show_help():
     console.print()
     
     console.print("[bold]USAGE[/bold]")
-    console.print("  lamp_site_cli [OPTIONS]")
+    console.print(f"  {BINARY_NAME} [OPTIONS]")
     console.print()
     
     console.print("[bold]OPTIONS[/bold]")
@@ -59,9 +89,9 @@ def show_help():
     console.print()
     
     console.print("[bold]EXAMPLES[/bold]")
-    console.print("  lamp_site_cli                    # Start interactive CLI")
-    console.print("  lamp_site_cli --help             # Show this help")
-    console.print("  lamp_site_cli --version          # Show version")
+    console.print(f"  {BINARY_NAME}                    # Start interactive CLI")
+    console.print(f"  {BINARY_NAME} --help             # Show this help")
+    console.print(f"  {BINARY_NAME} --version          # Show version")
     console.print()
     
     console.print("[bold]REQUIREMENTS[/bold]")
@@ -363,7 +393,7 @@ def manage_domain_suffix():
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        prog='lamp_site_cli',
+        prog=BINARY_NAME,
         description='LAMP Site CLI - Virtual Host Management Tool',
         add_help=False  # We'll handle help manually
     )

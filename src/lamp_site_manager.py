@@ -16,10 +16,17 @@ from getpass import getpass
 import platform
 from datetime import datetime
 
-from .lamp_site_detector import LampSiteDetector
-from .lamp_vhost_manager import LampVHostManager
-from .lamp_hosts_mamager import LampHostsManager
-from .lamp_vhost_manager import LampVHostManager
+try:
+    from .lamp_site_detector import LampSiteDetector
+    from .lamp_vhost_manager import LampVHostManager
+    from .lamp_hosts_mamager import LampHostsManager
+    from .lamp_apache_manager import LampApacheManager
+except Exception:
+    # Fallback flat imports for bundled envs
+    from lamp_site_detector import LampSiteDetector  # type: ignore
+    from lamp_vhost_manager import LampVHostManager  # type: ignore
+    from lamp_hosts_mamager import LampHostsManager  # type: ignore
+    from lamp_apache_manager import LampApacheManager  # type: ignore
 
 console = Console()
 
@@ -34,8 +41,8 @@ SITE_CONFIG_FILE = f"{LAMP_CONFIG_DIR}/fe_lamp_site.json"
 
 # Default settings
 DEFAULT_PORT = 8080
-DEFAULT_DOMAIN_SUFFIX = ".local"
-DEFAULT_DOC_ROOT = "/opt/homebrew/var/www"
+DEFAULT_DOMAIN_SUFFIX = ".test"
+DEFAULT_DOC_ROOT = f"{LAMP_CONFIG_DIR}/var/www"
 
 # Cache for vhost content to avoid repeated file reads
 _vhost_cache: Optional[str] = None
@@ -59,7 +66,10 @@ class LampSiteManager:
         self.domain_suffix = DEFAULT_DOMAIN_SUFFIX
         self.vhost = LampVHostManager(self.vhost_conf)
         self.hosts = LampHostsManager()
-        self.vhost = LampVHostManager(self.vhost_conf)
+        try:
+            self.apache = LampApacheManager(self.httpd_conf)
+        except Exception:
+            self.apache = None
         
     def _load_lamp_config(self) -> Dict[str, Any]:
         """Load LAMP configuration from fe_lamp.json."""
@@ -82,6 +92,44 @@ class LampSiteManager:
             self.console.print(f"[yellow]Warning: Could not load sites config: {e}[/yellow]")
         
         return {"sites": {}, "settings": {"domain_suffix": DEFAULT_DOMAIN_SUFFIX, "port": DEFAULT_PORT}}
+
+    def _ensure_vhost_file_exists(self) -> bool:
+        """Ensure the vhost config file exists on disk (create if missing)."""
+        vhost_path = self.vhost_conf
+        vhost_dir = os.path.dirname(vhost_path)
+        try:
+            if not os.path.isdir(vhost_dir):
+                os.makedirs(vhost_dir, exist_ok=True)
+        except PermissionError:
+            # Try with sudo if needed
+            try:
+                subprocess.run(["sudo", "mkdir", "-p", vhost_dir], check=True)
+            except subprocess.CalledProcessError:
+                self.console.print(f"[red]❌ Cannot create directory: {vhost_dir}[/red]")
+                return False
+        except Exception as e:
+            self.console.print(f"[red]❌ Error ensuring directory: {e}[/red]")
+            return False
+
+        if not os.path.exists(vhost_path):
+            header = (
+                "# Auto-created by FE LAMP\n"
+                "# Apache Virtual Hosts configuration\n\n"
+            )
+            try:
+                with open(vhost_path, 'w') as f:
+                    f.write(header)
+            except PermissionError:
+                try:
+                    subprocess.run(["sudo", "sh", "-c", f"printf '%s' \"{header}\" > {vhost_path}"], check=True)
+                except subprocess.CalledProcessError:
+                    self.console.print(f"[red]❌ Cannot create vhost file: {vhost_path}[/red]")
+                    return False
+            except Exception as e:
+                self.console.print(f"[red]❌ Error creating vhost file: {e}[/red]")
+                return False
+
+        return True
     
     def _save_sites_config(self) -> bool:
         """Save sites configuration to fe_lamp_site.json."""
@@ -261,18 +309,34 @@ class LampSiteManager:
         
         if self._check_vhost_module_enabled():
             self.console.print("[green]✅ Virtual host module is enabled[/green]")
+            # Ensure Include to vhosts is active
+            try:
+                if self.apache:
+                    self.apache.enable_vhosts(self.vhost_conf)
+            except Exception:
+                pass
             return True
         else:
             self.console.print("[yellow]⚠️ Virtual host module not enabled[/yellow]")
             self.console.print("[cyan]Attempting to enable virtual host module...[/cyan]")
-            
-            if self._enable_vhost_module():
-                self.console.print("[green]✅ Virtual host module enabled successfully[/green]")
-                self.console.print("[yellow]⚠️ Apache restart required for changes to take effect[/yellow]")
-                return True
-            else:
+
+            # Ensure vhost file exists before enabling Include
+            self._ensure_vhost_file_exists()
+
+            if not self._enable_vhost_module():
                 self.console.print("[red bold]❌ Failed to enable virtual host module[/red bold]")
                 return False
+
+            # Ensure Include to vhosts is active
+            try:
+                if self.apache:
+                    self.apache.enable_vhosts(self.vhost_conf)
+            except Exception:
+                pass
+
+            self.console.print("[green]✅ Virtual host module enabled successfully[/green]")
+            self.console.print("[yellow]⚠️ Apache restart required for changes to take effect[/yellow]")
+            return True
     
     def _check_domain_exists(self, domain: str) -> bool:
         """Check if domain already exists in vhost config."""
@@ -352,6 +416,9 @@ class LampSiteManager:
 
         self.console.print(f"[blue]🚀 Creating virtual host for {domain}...[/blue]")
 
+        # Ensure sudo permissions early (interactive prompt before progress spinner)
+        self._ensure_sudo_permissions()
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -413,24 +480,21 @@ class LampSiteManager:
             
             progress.update(task, description="Removing from hosts file and restarting Apache...")
 
-                # Safely remove only the specific domain token from /etc/hosts (any IP)
-                try:
-                    self.hosts.remove_domain(domain)
-                    subprocess.run(["brew", "services", "restart", "httpd"], check=True)
-                    
-                    # Remove from sites configuration
-                    if domain in self.sites["sites"]:
-                        del self.sites["sites"][domain]
-                        self._save_sites_config()
-                    
-                    self.console.print(f"[red]🗑️ Deleted virtual host:[/red] {domain}")
-                    return True
-                except subprocess.CalledProcessError as e:
-                    self.console.print(f"[red bold]❌ Failed to update hosts file or restart Apache:[/red bold] {e}")
-                    self.console.print(f"[yellow]Please ensure you have sudo privileges[/yellow]")
-                    return False
-            else:
-                self.console.print(f"[yellow]⚠️ Site not found:[/yellow] {domain}")
+            # Safely remove only the specific domain token from /etc/hosts (any IP)
+            try:
+                self.hosts.remove_domain(domain)
+                subprocess.run(["brew", "services", "restart", "httpd"], check=True)
+                
+                # Remove from sites configuration
+                if domain in self.sites["sites"]:
+                    del self.sites["sites"][domain]
+                    self._save_sites_config()
+                
+                self.console.print(f"[red]🗑️ Deleted virtual host:[/red] {domain}")
+                return True
+            except subprocess.CalledProcessError as e:
+                self.console.print(f"[red bold]❌ Failed to update hosts file or restart Apache:[/red bold] {e}")
+                self.console.print(f"[yellow]Please ensure you have sudo privileges[/yellow]")
                 return False
 
     def list_sites(self) -> None:
@@ -519,6 +583,13 @@ class LampSiteManager:
         # Check virtual host module
         vhost_enabled = self._check_vhost_module_enabled()
         self.console.print(f"[blue]Virtual Host Module:[/blue] {'✅ Enabled' if vhost_enabled else '❌ Disabled'}")
+        # VHosts include status
+        try:
+            if self.apache:
+                s = self.apache.vhosts_status(self.vhost_conf)
+                self.console.print(f"[blue]VHosts Include:[/blue] {'✅ Enabled' if s.get('enabled') else '❌ Disabled'} → {s.get('path')} ({'exists' if s.get('exists') else 'missing'})")
+        except Exception:
+            pass
         
         # Show current port
         self.console.print(f"[blue]Current Port:[/blue] {self.apache_port}")

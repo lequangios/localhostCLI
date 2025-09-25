@@ -9,6 +9,11 @@ from typing import List, Optional, Tuple, Dict, Any
 import secrets
 import string
 import getpass
+try:
+    from .lamp_apache_manager import LampApacheManager
+except Exception:
+    # Fallback when loaded as a flat module in bundled environments
+    from lamp_apache_manager import LampApacheManager  # type: ignore
 
 
 class LampManager:
@@ -39,6 +44,12 @@ class LampManager:
         if check and process.returncode != 0:
             raise subprocess.CalledProcessError(process.returncode, command, process.stdout, process.stderr)
         return process.returncode, process.stdout.strip(), process.stderr.strip()
+
+    def _get_apache_manager(self) -> Optional[LampApacheManager]:
+        try:
+            return LampApacheManager(self.get_httpd_conf_path())
+        except Exception:
+            return None
 
     def which(self, program: str) -> Optional[str]:
         """Return absolute path to program if found in PATH, else None."""
@@ -406,6 +417,15 @@ class LampManager:
             print(f"Failed to write {conf_path}: {e}", file=sys.stderr)
             return None
 
+    def ensure_directory_index_priority(self, httpd_conf: Optional[str] = None) -> bool:
+        """Ensure Apache DirectoryIndex prioritizes index.php using LampApacheManager."""
+        try:
+            am = LampApacheManager(httpd_conf or self.get_httpd_conf_path())
+            return am.set_directory_index_priority_php()
+        except Exception as e:
+            print(f"Failed to enforce DirectoryIndex priority via LampApacheManager: {e}", file=sys.stderr)
+            return False
+
     # Public API
     def get_status_lines(self) -> List[str]:
         self.ensure_brew_available()
@@ -461,6 +481,22 @@ class LampManager:
         for formula in ["httpd", "php", db_choice]:
             start_service(formula)
 
+        # Ensure Apache port and document root use FE LAMP defaults BEFORE PHP config/tests
+        try:
+            current_apache = self.get_current_apache_config()
+            current_port = current_apache.get("port") or 8080
+            desired_doc_root = "/opt/fe_lamp/var/www"
+            self.configure_apache_complete(port=current_port, doc_root=desired_doc_root)
+            # Ensure vhosts include is enabled and default :8080 vhost exists (avoids 403 when name-vhosts are active)
+            try:
+                am = self._get_apache_manager()
+                if am:
+                    am.enable_vhosts()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Warning: failed to apply Apache port/doc_root defaults: {e}", file=sys.stderr)
+
         # Configure Apache for PHP after installation
         print("Configuring Apache for PHP...")
         self.setup_and_test_php()
@@ -500,9 +536,27 @@ class LampManager:
             mysql_bin=mysql_bin,
         )
 
+        # Ensure Apache prioritizes index.php over index.html
+        try:
+            am = self._get_apache_manager()
+            if am:
+                am.set_directory_index_priority_php()
+        except Exception as e:
+            print(f"Warning: failed to enforce DirectoryIndex priority: {e}", file=sys.stderr)
+
+        # Enable mod_rewrite for Apache
+        try:
+            am = self._get_apache_manager()
+            if am:
+                am.enable_mod_rewrite()
+        except Exception as e:
+            print(f"Warning: failed to enable mod_rewrite: {e}", file=sys.stderr)
+
         # After successful installation and configuration, deploy index template to web root
         try:
-            template_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "template", "index_template.php")
+            # Resolve template path for both source and bundled (PyInstaller) modes
+            base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
+            template_path = os.path.join(base_dir, "template", "index_template.php")
             target_path = os.path.join(doc_root, "index.php")
 
             # Ensure doc_root exists
@@ -523,7 +577,146 @@ class LampManager:
         except Exception as e:
             print(f"Error deploying index template: {e}", file=sys.stderr)
 
-    def export_all_databases(self, export_dir: str, user: str, password: Optional[str]) -> Optional[str]:
+    def export_all_databases(self, export_dir: str, user: str, password: Optional[str], 
+                           schema_only: bool = False, compress: bool = True) -> List[str]:
+        """Export all databases with enhanced options.
+        
+        Args:
+            export_dir: Directory to save exported files
+            user: Database user
+            password: Database password
+            schema_only: If True, export only schema (no data)
+            compress: If True, compress files to .sql.gz format
+            
+        Returns:
+            List of exported file paths
+        """
+        db_formula = self.detect_database_formula()
+        if not db_formula:
+            print("No MySQL/MariaDB installation detected; skipping DB export.")
+            return []
+
+        dump_bin = self.which("mysqldump")
+        if not dump_bin:
+            print("mysqldump not found in PATH; skipping DB export.")
+            return []
+
+        # Get list of databases
+        databases = self._get_database_list(user, password)
+        if not databases:
+            print("No databases found to export.")
+            return []
+
+        os.makedirs(export_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        exported_files = []
+
+        env = os.environ.copy()
+        if password is not None:
+            env["MYSQL_PWD"] = password
+
+        for db_name in databases:
+            print(f"Exporting database: {db_name}")
+            
+            # Build mysqldump command
+            cmd = [dump_bin, "-u", user]
+            
+            if schema_only:
+                cmd.extend(["--no-data", "--routines", "--triggers"])
+            else:
+                cmd.extend(["--single-transaction", "--quick", "--lock-tables=false"])
+            
+            cmd.append(db_name)
+            
+            # Determine output file
+            if compress:
+                output_file = os.path.join(export_dir, f"{db_name}_{timestamp}.sql.gz")
+            else:
+                output_file = os.path.join(export_dir, f"{db_name}_{timestamp}.sql")
+            
+            try:
+                if compress:
+                    # Use gzip compression
+                    with open(output_file, 'wb') as f:
+                        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                           text=True, env=env)
+                        if proc.returncode == 0:
+                            # Compress the output
+                            import gzip
+                            with gzip.open(output_file, 'wt') as gz_file:
+                                gz_file.write(proc.stdout)
+                        else:
+                            print(f"Failed to export {db_name}: {proc.stderr.strip()}", file=sys.stderr)
+                            continue
+                else:
+                    # No compression
+                    with open(output_file, 'w') as f:
+                        proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, 
+                                           text=True, env=env)
+                        if proc.returncode != 0:
+                            print(f"Failed to export {db_name}: {proc.stderr.strip()}", file=sys.stderr)
+                            continue
+                
+                exported_files.append(output_file)
+                print(f"✅ Exported {db_name} to {output_file}")
+                
+            except Exception as e:
+                print(f"❌ Error exporting {db_name}: {e}", file=sys.stderr)
+                continue
+
+        if exported_files:
+            print(f"✅ Database export completed. {len(exported_files)} files exported to {export_dir}")
+        else:
+            print("❌ No databases were successfully exported.")
+            
+        return exported_files
+
+    def _get_database_list(self, user: str, password: Optional[str]) -> List[str]:
+        """Get list of all databases (excluding system databases)."""
+        try:
+            env = os.environ.copy()
+            if password is not None:
+                env["MYSQL_PWD"] = password
+            
+            # Get list of databases, excluding system databases
+            cmd = [
+                "mysql", "-u", user, "-e", 
+                "SHOW DATABASES WHERE `Database` NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys');"
+            ]
+            
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            if proc.returncode != 0:
+                print(f"Failed to get database list: {proc.stderr.strip()}", file=sys.stderr)
+                return []
+            
+            # Parse output to get database names
+            databases = []
+            for line in proc.stdout.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('Database'):
+                    databases.append(line)
+            
+            return databases
+            
+        except Exception as e:
+            print(f"Error getting database list: {e}", file=sys.stderr)
+            return []
+
+    def export_single_database(self, database: str, export_dir: str, user: str, password: Optional[str],
+                              schema_only: bool = False, compress: bool = True) -> Optional[str]:
+        """Export a single database with enhanced options.
+        
+        Args:
+            database: Database name to export
+            export_dir: Directory to save exported file
+            user: Database user
+            password: Database password
+            schema_only: If True, export only schema (no data)
+            compress: If True, compress file to .sql.gz format
+            
+        Returns:
+            Path to exported file or None if failed
+        """
         db_formula = self.detect_database_formula()
         if not db_formula:
             print("No MySQL/MariaDB installation detected; skipping DB export.")
@@ -536,36 +729,57 @@ class LampManager:
 
         os.makedirs(export_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dump_path = os.path.join(export_dir, f"all_databases_{timestamp}.sql")
 
         env = os.environ.copy()
         if password is not None:
             env["MYSQL_PWD"] = password
 
-        cmd = [
-            dump_bin,
-            "--all-databases",
-            "--single-transaction",
-            "--quick",
-            "--lock-tables=false",
-            "-u",
-            user,
-        ]
-
-        print(f"Exporting all databases to {dump_path} ...")
-        with open(dump_path, "w") as fh:
-            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, text=True, env=env)
-        if proc.returncode != 0:
-            try:
-                if os.path.exists(dump_path):
-                    os.remove(dump_path)
-            except Exception:
-                pass
-            print("Failed to export databases:", proc.stderr.strip(), file=sys.stderr)
+        # Build mysqldump command
+        cmd = [dump_bin, "-u", user]
+        
+        if schema_only:
+            cmd.extend(["--no-data", "--routines", "--triggers"])
+        else:
+            cmd.extend(["--single-transaction", "--quick", "--lock-tables=false"])
+        
+        cmd.append(database)
+        
+        # Determine output file
+        if compress:
+            output_file = os.path.join(export_dir, f"{database}_{timestamp}.sql.gz")
+        else:
+            output_file = os.path.join(export_dir, f"{database}_{timestamp}.sql")
+        
+        try:
+            if compress:
+                # Use gzip compression
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                   text=True, env=env)
+                if proc.returncode == 0:
+                    # Compress the output
+                    import gzip
+                    with gzip.open(output_file, 'wt') as gz_file:
+                        gz_file.write(proc.stdout)
+                    print(f"✅ Exported {database} to {output_file}")
+                    return output_file
+                else:
+                    print(f"Failed to export {database}: {proc.stderr.strip()}", file=sys.stderr)
+                    return None
+            else:
+                # No compression
+                with open(output_file, 'w') as f:
+                    proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, 
+                                       text=True, env=env)
+                    if proc.returncode == 0:
+                        print(f"✅ Exported {database} to {output_file}")
+                        return output_file
+                    else:
+                        print(f"Failed to export {database}: {proc.stderr.strip()}", file=sys.stderr)
+                        return None
+                        
+        except Exception as e:
+            print(f"❌ Error exporting {database}: {e}", file=sys.stderr)
             return None
-
-        print("Database export completed.")
-        return dump_path
 
     def uninstall(self, export_db: bool = False, export_path: Optional[str] = None, db_user: str = "root", db_password: Optional[str] = None) -> None:
         self.ensure_brew_available()
@@ -579,7 +793,8 @@ class LampManager:
 
         if export_db:
             export_dir = export_path or os.path.join(os.getcwd(), "db_exports")
-            self.export_all_databases(export_dir=export_dir, user=db_user, password=db_password)
+            self.export_all_databases(export_dir=export_dir, user=db_user, password=db_password, 
+                                    schema_only=False, compress=True)
 
         to_uninstall = [f for f in ["httpd", "php", "mysql", "mariadb", "phpmyadmin"] if self.brew_is_installed(f)]
         for formula in to_uninstall:
@@ -647,6 +862,8 @@ class LampManager:
         """Restart services for the given components (default: all installed core services)."""
         self.ensure_brew_available()
         targets = self._resolve_components(components)
+        # Explicitly exclude phpmyadmin (not a service)
+        targets = [t for t in targets if t != "phpmyadmin"]
         for name in targets:
             print(f"Restarting {name}...")
             code, out, err = self.run_command(f"brew services restart {shlex.quote(name)}")
@@ -672,52 +889,92 @@ class LampManager:
             with open(httpd_conf, 'r') as f:
                 content = f.read()
             
-            # Check if PHP module is already loaded
-            if "LoadModule php_module" in content and "LoadModule php_module" not in [line.strip() for line in content.split('\n') if line.strip().startswith('#')]:
-                print("PHP module already configured in Apache")
-                return True
-            
-            # Find PHP module path
-            php_module_path = self._find_php_module_path()
-            if not php_module_path:
-                print("Could not find PHP module path", file=sys.stderr)
-                return False
-            
-            # Add PHP module load directive
-            php_module_line = f"LoadModule php_module {php_module_path}"
-            
-            # Find where to insert (after other LoadModule directives)
             lines = content.split('\n')
-            insert_index = 0
-            for i, line in enumerate(lines):
-                if line.strip().startswith('LoadModule'):
-                    insert_index = i + 1
-            
-            # Insert PHP module load
-            lines.insert(insert_index, php_module_line)
-            lines.insert(insert_index + 1, "")
-            
-            # Add PHP handler and session configuration
-            php_handler_lines = [
-                "",
-                "# PHP Configuration",
-                "<FilesMatch \\.php$>",
-                "    SetHandler application/x-httpd-php",
-                "</FilesMatch>",
-                "",
-                "# PHP index files",
-                "<IfModule dir_module>",
-                "    DirectoryIndex index.php index.html",
-                "</IfModule>",
-                "",
-                "# PHP Session Configuration",
-                "<IfModule php_module>",
-                "    php_value session.save_path \"/opt/fe_lamp/tmp\"",
-                "    php_value session.gc_maxlifetime 1440",
-                "    php_value session.cookie_lifetime 0",
-                "    php_value session.auto_start 0",
-                "</IfModule>"
-            ]
+
+            # 1) Try mod_php first
+            php_module_path = self._find_php_module_path()
+            if php_module_path:
+                # If LoadModule already active, do not add again; still ensure PHP handler exists
+                mod_php_active = ("LoadModule php_module" in content) and not any(l.strip().startswith('#') and 'LoadModule php_module' in l for l in lines)
+                if not mod_php_active:
+                    php_module_line = f"LoadModule php_module {php_module_path}"
+                    insert_index = 0
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith('LoadModule'):
+                            insert_index = i + 1
+                    lines.insert(insert_index, php_module_line)
+                    lines.insert(insert_index + 1, "")
+
+                # Prepare mod_php handler block if missing
+                has_php_filesmatch = any('<FilesMatch' in l and '.php' in l for l in lines) and ('application/x-httpd-php' in content)
+                php_handler_lines = []
+                if not has_php_filesmatch:
+                    php_handler_lines.extend([
+                        "",
+                        "# PHP Configuration (mod_php)",
+                        "<FilesMatch \\.php$>",
+                        "    SetHandler application/x-httpd-php",
+                        "</FilesMatch>",
+                    ])
+                # Ensure DirectoryIndex exists (LampApacheManager also enforces priority elsewhere)
+                if 'DirectoryIndex index.php' not in content:
+                    php_handler_lines.extend([
+                        "",
+                        "# PHP index files",
+                        "<IfModule dir_module>",
+                        "    DirectoryIndex index.php index.html",
+                        "</IfModule>",
+                    ])
+                # Add session config under php_module if missing
+                if 'session.save_path' not in content:
+                    php_handler_lines.extend([
+                        "",
+                        "# PHP Session Configuration",
+                        "<IfModule php_module>",
+                        "    php_value session.save_path \"/opt/fe_lamp/tmp\"",
+                        "    php_value session.gc_maxlifetime 1440",
+                        "    php_value session.cookie_lifetime 0",
+                        "    php_value session.auto_start 0",
+                        "</IfModule>",
+                    ])
+            else:
+                # 2) Fallback to PHP-FPM via proxy_fcgi
+                print("Configuring Apache to use PHP-FPM (proxy_fcgi)...")
+
+                # Ensure proxy modules are present
+                have_proxy = any(l.strip().startswith('LoadModule proxy_module') for l in lines)
+                have_proxy_fcgi = any(l.strip().startswith('LoadModule proxy_fcgi_module') for l in lines)
+                insert_index = 0
+                for i, line in enumerate(lines):
+                    if line.strip().startswith('LoadModule'):
+                        insert_index = i + 1
+                if not have_proxy:
+                    lines.insert(insert_index, 'LoadModule proxy_module lib/httpd/modules/mod_proxy.so')
+                    insert_index += 1
+                if not have_proxy_fcgi:
+                    lines.insert(insert_index, 'LoadModule proxy_fcgi_module lib/httpd/modules/mod_proxy_fcgi.so')
+
+                # Detect php-fpm listen target
+                fpm_target = self._detect_php_fpm_target()
+                if not fpm_target:
+                    print("Could not detect PHP-FPM listen target", file=sys.stderr)
+                    return False
+
+                handler = f'proxy:{fpm_target}'
+                php_handler_lines = [
+                    "",
+                    "# PHP Configuration (php-fpm via proxy_fcgi)",
+                    "<IfModule proxy_fcgi_module>",
+                    "    <FilesMatch \\.php$>",
+                    f"        SetHandler \"{handler}\"",
+                    "    </FilesMatch>",
+                    "</IfModule>",
+                    "",
+                    "# PHP index files",
+                    "<IfModule dir_module>",
+                    "    DirectoryIndex index.php index.html",
+                    "</IfModule>",
+                ]
             
             # Find end of file or last directive
             end_index = len(lines)
@@ -839,7 +1096,7 @@ class LampManager:
             print(f"Apache is not running (status: {apache_status}). Starting Apache...")
             self.start_services(["httpd"])
             import time
-            time.sleep(3)  # Wait for Apache to start
+            time.sleep(5)  # Wait for Apache to start
         
         # Create info.php file with more comprehensive test
         info_php_path = os.path.join(doc_root, "info.php")
@@ -873,11 +1130,16 @@ phpinfo();
             print(f"Failed to create info.php: {e}", file=sys.stderr)
             return False
         
-        # Test with curl - try multiple ports and methods
+        # Determine actual Apache port from config
+        apache_cfg = self.get_current_apache_config()
+        detected_port = apache_cfg.get("port") or 8080
+        # Test with curl - use detected port first, then fallbacks
         test_urls = [
+            f"http://localhost:{detected_port}/info.php",
+            f"http://127.0.0.1:{detected_port}/info.php",
             "http://localhost:8080/info.php",
-            "http://localhost:80/info.php", 
             "http://127.0.0.1:8080/info.php",
+            "http://localhost:80/info.php",
             "http://127.0.0.1:80/info.php"
         ]
         
@@ -887,7 +1149,7 @@ phpinfo();
         for url in test_urls:
             try:
                 print(f"Testing URL: {url}")
-                code, out, err = self.run_command(f"curl -I -s --connect-timeout 5 {url}")
+                code, out, err = self.run_command(f"curl -I -s --connect-timeout 8 {url}")
                 
                 if code == 0:
                     if "HTTP/1.1 200" in out or "HTTP/2 200" in out:
@@ -950,7 +1212,57 @@ phpinfo();
         import time
         time.sleep(2)
         
-        return self.test_php_setup()
+        result = self.test_php_setup()
+        # Ensure DirectoryIndex prioritizes index.php after PHP setup
+        try:
+            am = self._get_apache_manager()
+            if am:
+                am.set_directory_index_priority_php()
+        except Exception:
+            pass
+        return result
+
+    def _detect_php_fpm_target(self) -> Optional[str]:
+        """Detect PHP-FPM listen target. Returns fcgi URL part for proxy (e.g. fcgi://127.0.0.1:9000 or unix:/path.sock|fcgi://localhost/)."""
+        try:
+            # Try common Homebrew php-fpm conf locations
+            prefix = self.brew_prefix()
+            conf_globs = [
+                os.path.join(prefix, 'etc', 'php'),
+                '/opt/homebrew/etc/php',
+                '/usr/local/etc/php'
+            ]
+            for base in conf_globs:
+                if not os.path.isdir(base):
+                    continue
+                for ver in sorted(os.listdir(base), reverse=True):
+                    conf_path = os.path.join(base, ver, 'php-fpm.d', 'www.conf')
+                    if os.path.exists(conf_path):
+                        with open(conf_path, 'r') as f:
+                            txt = f.read()
+                        # find listen = ...
+                        for line in txt.splitlines():
+                            s = line.strip()
+                            if s.startswith('listen'):
+                                parts = s.split('=', 1)
+                                if len(parts) == 2:
+                                    target = parts[1].strip()
+                                    if target.startswith('/'):
+                                        # unix socket
+                                        return f'unix:{target}|fcgi://localhost/'
+                                    else:
+                                        # host:port
+                                        if not target.startswith('fcgi://'):
+                                            return f'fcgi://{target}'
+                                        return target
+            # fallback common socket
+            sock = '/opt/homebrew/var/run/php-fpm.sock'
+            if os.path.exists(sock):
+                return f'unix:{sock}|fcgi://localhost/'
+            # fallback tcp
+            return 'fcgi://127.0.0.1:9000'
+        except Exception:
+            return None
     
     def configure_mysql_root(self, password: str = "fe_root") -> bool:
         """Configure MySQL root user with specified password."""
@@ -1400,7 +1712,7 @@ $cfg['Server'] = 1;
             print(f"❌ Failed to configure Apache document root: {e}", file=sys.stderr)
             return False
     
-    def configure_apache_complete(self, port: int = 8080, doc_root: str = "/opt/homebrew/var/www") -> bool:
+    def configure_apache_complete(self, port: int = 8080, doc_root: str = "/opt/fe_lamp/var/www") -> bool:
         """Complete Apache configuration: port and document root."""
         print("Configuring Apache port and document root...")
         

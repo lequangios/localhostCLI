@@ -231,6 +231,14 @@
             $sitesData = $decoded;
         }
     }
+    // Load FE LAMP server info
+    $feLampFile = '/opt/fe_lamp/fe_lamp.json';
+    $feLamp = [];
+    if (file_exists($feLampFile)) {
+        $j2 = file_get_contents($feLampFile);
+        $d2 = json_decode($j2, true);
+        if (is_array($d2)) { $feLamp = $d2; }
+    }
 
     function h($str) {
         return htmlspecialchars((string)$str, ENT_QUOTES, 'UTF-8');
@@ -268,10 +276,23 @@
         </div>
         
         <div class="status">
-            <h2>✅ Server is Running</h2>
-            <p>Welcome to Four Elements Web Server! Choose a project to start testing.</p>
+            <h2>✅ Server Control</h2>
+            <p id="serverStatus">Welcome to Four Elements Web Server! Use the controls below.</p>
+            <div style="margin-top:12px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+                <button id="btnStart" style="padding:8px 14px;border:none;border-radius:8px;cursor:pointer;background:#4CAF50;color:#fff;">Start</button>
+                <button id="btnStop" style="padding:8px 14px;border:none;border-radius:8px;cursor:pointer;background:#E53935;color:#fff;">Stop</button>
+                <button id="btnRestart" style="padding:8px 14px;border:none;border-radius:8px;cursor:pointer;background:#FB8C00;color:#fff;">Restart</button>
+                <button id="btnStatus" style="padding:8px 14px;border:none;border-radius:8px;cursor:pointer;background:#2196F3;color:#fff;">Status</button>
+            </div>
         </div>
         
+        <div class="top-nav" style="display:flex;gap:10px;justify-content:center;margin:10px 0 20px 0;">
+            <button class="nav-button" data-nav="home" style="padding:10px 16px;border-radius:8px;border:none;cursor:pointer;">🏠 Home</button>
+            <button class="nav-button" data-nav="information" style="padding:10px 16px;border-radius:8px;border:none;cursor:pointer;">ℹ️ Information</button>
+            <button class="nav-button" data-nav="help" style="padding:10px 16px;border-radius:8px;border:none;cursor:pointer;">❓ Help</button>
+        </div>
+
+        <div class="nav-content" id="home">
         <div class="tabs-container">
             <!-- Tab Navigation -->
             <div class="tabs-nav">
@@ -339,6 +360,77 @@
                 </div>
             </div>
         </div>
+        </div>
+
+        <div class="nav-content" id="information" style="display:none;">
+            <div class="status">
+                <h2>ℹ️ Server Information</h2>
+                <p>Configuration loaded from /opt/fe_lamp/fe_lamp.json</p>
+            </div>
+            <div class="projects">
+                <div class="project-card">
+                    <h3>System</h3>
+                    <p>
+                        <?php
+                        $sys = isset($feLamp['system']) && is_array($feLamp['system']) ? $feLamp['system'] : [];
+                        function hv($arr, $k) { return htmlspecialchars(isset($arr[$k]) ? (string)$arr[$k] : '', ENT_QUOTES, 'UTF-8'); }
+                        ?>
+                        <strong>Apache Config:</strong> <?php echo hv($sys,'httpd_conf'); ?><br>
+                        <strong>Document Root:</strong> <?php echo hv($sys,'doc_root'); ?><br>
+                        <strong>Apache Port:</strong> <?php echo hv($sys,'apache_port'); ?><br>
+                        <strong>PHP Version:</strong> <?php echo hv($sys,'php_version'); ?><br>
+                        <strong>PHP ini:</strong> <?php echo hv($sys,'php_ini'); ?><br>
+                        <strong>phpMyAdmin Path:</strong> <?php echo hv($sys,'pma_path'); ?><br>
+                        <strong>phpMyAdmin Config:</strong> <?php echo hv($sys,'pma_config'); ?><br>
+                        <strong>MySQL User:</strong> <?php echo hv($sys,'mysql_username'); ?><br>
+                        <strong>MySQL Password:</strong> <?php echo hv($sys,'mysql_password'); ?><br>
+                        <strong>Updated At:</strong> <?php echo hv($sys,'update_date'); ?><br>
+                    </p>
+                </div>
+                <div class="project-card">
+                    <h3>Components</h3>
+                    <p>Installed components detected by FE LAMP:</p>
+                    <ul>
+                        <?php if (isset($feLamp['components']) && is_array($feLamp['components'])): ?>
+                            <?php foreach ($feLamp['components'] as $c): ?>
+                                <li>
+                                    <?php echo htmlspecialchars(($c['name'] ?? 'component').' '.($c['version'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>
+                                    — bin: <?php echo htmlspecialchars($c['bin'] ?? '', ENT_QUOTES, 'UTF-8'); ?>
+                                </li>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <li>No component information.</li>
+                        <?php endif; ?>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="nav-content" id="help" style="display:none;">
+            <div class="status">
+                <h2>❓ Help</h2>
+                <p>Common commands for FE LAMP CLI.</p>
+            </div>
+            <div class="projects">
+                <div class="project-card">
+                    <h3>Core</h3>
+                    <div class="project-links" style="gap:6px;">
+                        <code>fe_lamp status</code>
+                        <code>fe_lamp install --db mysql</code>
+                        <code>fe_lamp start | stop | restart</code>
+                        <code>fe_lamp configure-apache --port 8080 --doc-root /opt/homebrew/var/www</code>
+                        <code>fe_lamp show-apache-config</code>
+                    </div>
+                </div>
+                <div class="project-card">
+                    <h3>Sites</h3>
+                    <div class="project-links" style="gap:6px;">
+                        <code>fe_lamp_site</code>
+                        <code>fe_lamp_site --help</code>
+                    </div>
+                </div>
+            </div>
+        </div>
         
         <div class="footer">
             <p>Four Elements Web Server - LAMP stack server</p>
@@ -356,7 +448,7 @@
     <script>
         // Add some interactivity
         document.addEventListener('DOMContentLoaded', function() {
-            // Tab functionality
+            // Inner tabs functionality
             const tabButtons = document.querySelectorAll('.tab-button');
             const tabContents = document.querySelectorAll('.tab-content');
             
@@ -388,6 +480,50 @@
                     e.target.click();
                 }
             });
+
+            // Top navigation functionality
+            const navButtons = document.querySelectorAll('.nav-button');
+            const navContents = document.querySelectorAll('.nav-content');
+            function setNav(target) {
+                navButtons.forEach(btn => btn.classList.remove('active'));
+                navContents.forEach(c => c.style.display = 'none');
+                const btn = document.querySelector(`.nav-button[data-nav="${target}"]`);
+                const content = document.getElementById(target);
+                if (btn) btn.classList.add('active');
+                if (content) content.style.display = 'block';
+            }
+            navButtons.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    setNav(this.getAttribute('data-nav'));
+                });
+            });
+            // default
+            setNav('home');
+
+            // Server control actions
+            async function callApi(action) {
+                const el = document.getElementById('serverStatus');
+                try {
+                    el.textContent = 'Processing ' + action + ' ...';
+                    const res = await fetch('api.php?action=' + encodeURIComponent(action));
+                    const data = await res.json();
+                    if (data && data.ok) {
+                        el.textContent = action + ' ok';
+                    } else {
+                        el.textContent = action + ' failed';
+                    }
+                } catch (e) {
+                    el.textContent = action + ' error';
+                }
+            }
+            const btnStart = document.getElementById('btnStart');
+            const btnStop = document.getElementById('btnStop');
+            const btnRestart = document.getElementById('btnRestart');
+            const btnStatus = document.getElementById('btnStatus');
+            if (btnStart) btnStart.addEventListener('click', () => callApi('lamp_start'));
+            if (btnStop) btnStop.addEventListener('click', () => callApi('lamp_stop'));
+            if (btnRestart) btnRestart.addEventListener('click', () => callApi('lamp_restart'));
+            if (btnStatus) btnStatus.addEventListener('click', () => callApi('lamp_status'));
         });
     </script>
 </body>
